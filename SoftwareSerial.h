@@ -1,5 +1,14 @@
 /*
-SoftwareSerial.h (formerly NewSoftSerial.h) - 
+ Modified by WaveDough to override PCINT0_vect
+ 
+ Modified by WaveDough to override PCINT0_vect
+ -- Inluning was removed from interrupt_handler so it can
+    be called externally.
+ -- PCINT vector calls were removed so they can be implemented
+    by an external handler.
+ End of modifications. Contact us at watchdog@wavedough.anonaddy.com.
+
+ WD_SoftwareSerial.h (formerly NewSoftSerial.h) -
 Multi-instance software serial library for Arduino/Wiring
 -- Interrupt-driven receive and other improvements by ladyada
    (http://ladyada.net)
@@ -10,6 +19,7 @@ Multi-instance software serial library for Arduino/Wiring
 -- Pin change interrupt macros by Paul Stoffregen (http://www.pjrc.com)
 -- 20MHz processor support by Garrett Mace (http://www.macetech.com)
 -- ATmega1280/2560 support by Brett Hagman (http://www.roguerobotics.com/)
+-- ATmega8/16/32/64/128/8515/8535 support by MCUdude (https://github.com/MCUdude)
 
 This library is free software; you can redistribute it and/or
 modify it under the terms of the GNU Lesser General Public
@@ -29,67 +39,53 @@ The latest version of this library can always be found at
 http://arduiniana.org.
 */
 
-#ifndef SoftwareSerial_h
-#define SoftwareSerial_h
+#ifndef WD_SoftwareSerial_h
+#define WD_SoftwareSerial_h
 
 #include <inttypes.h>
 #include <Stream.h>
-#include <HardwareSerial.h>
+
+
+// Microcontrollers that only make use of INTs
+#if defined(__AVR_ATmega8__)  || defined(__AVR_ATmega16__)  || defined(__AVR_ATmega32__)   || \
+    defined(__AVR_ATmega64__) || defined(__AVR_ATmega128__) || defined(__AVR_ATmega8515__) || \
+    defined(__AVR_ATmega8535__)
+  #define INT_ONLY
+// Microcontrollers that make use of INTs and PCINTs
+#elif defined(__AVR_ATmega162__)  || defined(__AVR_ATmega640__)  || defined(__AVR_ATmega1280__) || \
+      defined(__AVR_ATmega1281__) || defined(__AVR_ATmega2560__) || defined(__AVR_ATmega2561__)
+  #define INT_AND_PCINT
+// Microcontrollers that only make use of PCINTs
+#else
+  #define PCINT_ONLY
+#endif
+
 
 /******************************************************************************
 * Definitions
 ******************************************************************************/
 
+#ifndef _SS_MAX_RX_BUFF
 #define _SS_MAX_RX_BUFF 64 // RX buffer size
+#endif
+
 #ifndef GCC_VERSION
 #define GCC_VERSION (__GNUC__ * 10000 + __GNUC_MINOR__ * 100 + __GNUC_PATCHLEVEL__)
 #endif
 
-#if defined(__MK20DX128__) || defined(__MK20DX256__) || defined(__MKL26Z64__) || defined(__MK64FX512__) || defined(__MK66FX1M0__) || defined(__IMXRT1052__) || defined(__IMXRT1062__)
-
-class SoftwareSerial : public Stream
-{
-public:
-	SoftwareSerial(uint8_t rxPin, uint8_t txPin, bool inverse_logic = false);
-	~SoftwareSerial() { end(); }
-	void begin(unsigned long speed);
-	void end();
-	bool listen() { return true; }
-	bool isListening() { return true; }
-	bool overflow() { bool ret = buffer_overflow; buffer_overflow = false; return ret; }
-	virtual int available();
-	virtual int read();
-	int peek();
-	virtual void flush();
-	virtual size_t write(uint8_t byte);
-	operator bool() { return true; }
-	using Print::write;
-private:
-	HardwareSerial *port;
-	uint32_t cycles_per_bit;
-	#if defined(__IMXRT1052__) || defined(__IMXRT1062__)
-	volatile uint32_t *txreg;
-	volatile uint32_t *rxreg;
-	#else
-	volatile uint8_t *txreg;
-	volatile uint8_t *rxreg;
-	#endif
-	bool buffer_overflow;
-	uint8_t txpin;
-	uint8_t rxpin;
-};
-
-#else
-class SoftwareSerial : public Stream
+class WD_SoftwareSerial : public Stream
 {
 private:
   // per object data
-  uint8_t _receivePin;
+  int8_t _receivePin;
   uint8_t _receiveBitMask;
   volatile uint8_t *_receivePortRegister;
   uint8_t _transmitBitMask;
   volatile uint8_t *_transmitPortRegister;
+  volatile uint8_t *_pcint_maskreg;
+  uint8_t _pcint_maskvalue;
 
+  // Expressed as 4-cycle delays (must never be 0!)
   uint16_t _rx_delay_centering;
   uint16_t _rx_delay_intrabit;
   uint16_t _rx_delay_stopbit;
@@ -99,31 +95,34 @@ private:
   uint16_t _inverse_logic:1;
 
   // static data
-  static char _receive_buffer[_SS_MAX_RX_BUFF]; 
+  static uint8_t _receive_buffer[_SS_MAX_RX_BUFF]; 
   static volatile uint8_t _receive_buffer_tail;
   static volatile uint8_t _receive_buffer_head;
-  static SoftwareSerial *active_object;
+  static WD_SoftwareSerial *active_object;
 
   // private methods
-  void recv();
+  inline void recv() __attribute__((__always_inline__));
   uint8_t rx_pin_read();
-  void tx_pin_write(uint8_t pin_state);
-  void setTX(uint8_t transmitPin);
-  void setRX(uint8_t receivePin);
+  void setTX(int8_t transmitPin);
+  void setRX(int8_t receivePin);
+  inline void setRxIntMsk(bool enable) __attribute__((__always_inline__));
+
+  // Return num - sub, or 1 if the result would be < 1
+  static uint16_t subtract_cap(uint16_t num, uint16_t sub);
 
   // private static method for timing
   static inline void tunedDelay(uint16_t delay);
 
-
 public:
   // public methods
-  SoftwareSerial(uint8_t receivePin, uint8_t transmitPin, bool inverse_logic = false);
-  ~SoftwareSerial();
+  WD_SoftwareSerial(int8_t receivePin, int8_t transmitPin, bool inverse_logic = false);
+  ~WD_SoftwareSerial();
   void begin(long speed);
   bool listen();
   void end();
   bool isListening() { return this == active_object; }
-  bool overflow() { bool ret = _buffer_overflow; _buffer_overflow = false; return ret; }
+  bool stopListening();
+  bool overflow() { bool ret = _buffer_overflow; if (ret) _buffer_overflow = false; return ret; }
   int peek();
 
   virtual size_t write(uint8_t byte);
@@ -135,9 +134,16 @@ public:
   using Print::write;
 
   // public only for easy access by interrupt handlers
-  static inline void handle_interrupt();
+  static void handle_interrupt();
 };
 
-#endif
+// Arduino 0012 workaround
+#undef int
+#undef char
+#undef long
+#undef byte
+#undef float
+#undef abs
+#undef round
 
 #endif
