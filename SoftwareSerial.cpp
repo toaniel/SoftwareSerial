@@ -1,5 +1,13 @@
 /*
-SoftwareSerial.cpp (formerly NewSoftSerial.cpp) - 
+Modified by WaveDough to override PCINT0_vect
+ 
+-- Inlining was removed from interrupt_handler so it can
+   be called externally.
+-- PCINT vector calls were removed so they can be implemented
+   by an external handler.
+ End of modifications. Contact us at watchdog@wavedough.anonaddy.com.
+ 
+ WD_SoftwareSerial.cpp (formerly NewSoftSerial.cpp) -
 Multi-instance software serial library for Arduino/Wiring
 -- Interrupt-driven receive and other improvements by ladyada
    (http://ladyada.net)
@@ -10,6 +18,8 @@ Multi-instance software serial library for Arduino/Wiring
 -- Pin change interrupt macros by Paul Stoffregen (http://www.pjrc.com)
 -- 20MHz processor support by Garrett Mace (http://www.macetech.com)
 -- ATmega1280/2560 support by Brett Hagman (http://www.roguerobotics.com/)
+-- ATmega8/16/32/64/128/8515/8535 support by MCUdude (https://github.com/MCUdude)
+
 
 This library is free software; you can redistribute it and/or
 modify it under the terms of the GNU Lesser General Public
@@ -41,344 +51,25 @@ http://arduiniana.org.
 #include <avr/interrupt.h>
 #include <avr/pgmspace.h>
 #include <Arduino.h>
-#include <SoftwareSerial.h>
-
-
-#if defined(__MK20DX128__) || defined(__MK20DX256__) || defined(__MKL26Z64__) || defined(__MK64FX512__) || defined(__MK66FX1M0__) || defined(__IMXRT1052__) || defined(__IMXRT1062__)
-
-
-// Teensy LC, 3.0, 3.1, 3.2
-#if defined(__MK20DX128__) || defined(__MK20DX256__) || defined(__MKL26Z64__)
-  #define SS1_RX  0
-  #define SS1_TX  1
-  #define SS2_RX  9
-  #define SS2_TX 10
-  #define SS3_RX  7
-  #define SS3_TX  8
-
-// Teensy 3.5, 3.6
-#elif defined(__MK64FX512__) || defined(__MK66FX1M0__)
-  #define SS1_RX  0
-  #define SS1_TX  1
-  #define SS2_RX  9
-  #define SS2_TX 10
-  #define SS3_RX  7
-  #define SS3_TX  8
-  #define SS4_RX 31
-  #define SS4_TX 32
-  #define SS5_RX 34
-  #define SS5_TX 33
-  #define SS6_RX 47
-  #define SS6_TX 48
-
-// Teensy 4.0
-#elif defined(__IMXRT1062__) && defined(ARDUINO_TEENSY40)
-  #define SS1_RX  0
-  #define SS1_TX  1
-  #define SS2_RX  7
-  #define SS2_TX  8
-  #define SS3_RX 15
-  #define SS3_TX 14
-  #define SS4_RX 16
-  #define SS4_TX 17
-  #define SS5_RX 21
-  #define SS5_TX 20
-  #define SS6_RX 25
-  #define SS6_TX 24
-  #define SS7_RX 28
-  #define SS7_TX 29
-
-// Teensy 4.1
-#elif defined(__IMXRT1062__) && defined(ARDUINO_TEENSY41)
-  #define SS1_RX  0
-  #define SS1_TX  1
-  #define SS2_RX  7
-  #define SS2_TX  8
-  #define SS3_RX 15
-  #define SS3_TX 14
-  #define SS4_RX 16
-  #define SS4_TX 17
-  #define SS5_RX 21
-  #define SS5_TX 20
-  #define SS6_RX 25
-  #define SS6_TX 24
-  #define SS7_RX 28
-  #define SS7_TX 29
-  #define SS8_RX 34
-  #define SS8_TX 35
-
-#endif
-
-SoftwareSerial::SoftwareSerial(uint8_t rxPin, uint8_t txPin, bool inverse_logic /* = false */)
-{
-	buffer_overflow = false;
-
-#if defined(SS1_RX) && defined(SS1_TX)
-	if (rxPin == SS1_RX && txPin == SS1_TX) {
-		port = &Serial1;
-		return;
-	}
-#endif
-#if defined(SS2_RX) && defined(SS2_TX)
-	if (rxPin == SS2_RX && txPin == SS2_TX) {
-		port = &Serial2;
-		return;
-	}
-#endif
-#if defined(SS3_RX) && defined(SS3_TX)
-	if (rxPin == SS3_RX && txPin == SS3_TX) {
-		port = &Serial3;
-		return;
-	}
-#endif
-#if defined(SS4_RX) && defined(SS4_TX)
-	if (rxPin == SS4_RX && txPin == SS4_TX) {
-		port = &Serial4;
-		return;
-	}
-#endif
-#if defined(SS5_RX) && defined(SS5_TX)
-	if (rxPin == SS5_RX && txPin == SS5_TX) {
-		port = &Serial5;
-		return;
-	}
-#endif
-#if defined(SS6_RX) && defined(SS6_TX)
-	if (rxPin == SS6_RX && txPin == SS6_TX) {
-		port = &Serial6;
-		return;
-	}
-#endif
-#if defined(SS7_RX) && defined(SS7_TX)
-	if (rxPin == SS7_RX && txPin == SS7_TX) {
-		port = &Serial7;
-		return;
-	}
-#endif
-#if defined(SS8_RX) && defined(SS8_TX)
-	if (rxPin == SS8_RX && txPin == SS8_TX) {
-		port = &Serial8;
-		return;
-	}
-#endif
-	port = NULL;
-	pinMode(txPin, OUTPUT);
-	pinMode(rxPin, INPUT_PULLUP);
-	txpin = txPin;
-	rxpin = rxPin;
-	txreg = portOutputRegister(digitalPinToPort(txPin));
-	rxreg = portInputRegister(digitalPinToPort(rxPin));
-	cycles_per_bit = 0;
-}
-
-void SoftwareSerial::begin(unsigned long speed)
-{
-	if (port) {
-		port->begin(speed);
-	} else {
-		cycles_per_bit = (uint32_t)(F_CPU + speed / 2) / speed;
-		ARM_DEMCR |= ARM_DEMCR_TRCENA;
-		ARM_DWT_CTRL |= ARM_DWT_CTRL_CYCCNTENA;
-	}
-}
-
-void SoftwareSerial::end()
-{
-	if (port) {
-		port->end();
-		port = NULL;
-	} else {
-		pinMode(txpin, INPUT);
-		pinMode(rxpin, INPUT);
-	}
-	cycles_per_bit = 0;
-}
-
-// The worst case expected length of any interrupt routines.  If an
-// interrupt runs longer than this number of cycles, it can disrupt
-// the transmit waveform.  Increasing this number causes SoftwareSerial
-// to hog the CPU longer, delaying all interrupt response for other
-// libraries, so this should be made as small as possible but still
-// ensure accurate transmit waveforms.
-#define WORST_INTERRUPT_CYCLES 360
-
-static void wait_for_target(uint32_t begin, uint32_t target)
-{
-	if (target - (ARM_DWT_CYCCNT - begin) > WORST_INTERRUPT_CYCLES+20) {
-		uint32_t pretarget = target - WORST_INTERRUPT_CYCLES;
-		//digitalWriteFast(12, HIGH);
-		interrupts();
-		while (ARM_DWT_CYCCNT - begin < pretarget) ; // wait
-		noInterrupts();
-		//digitalWriteFast(12, LOW);
-	}
-	while (ARM_DWT_CYCCNT - begin < target) ; // wait
-}
-
-size_t SoftwareSerial::write(uint8_t b)
-{
-	elapsedMicros elapsed;
-	uint32_t target;
-	uint8_t mask;
-	uint32_t begin_cycle;
-
-	// use hardware serial, if possible
-	if (port) return port->write(b);
-	if (cycles_per_bit == 0) return 0;
-	ARM_DEMCR |= ARM_DEMCR_TRCENA;
-	ARM_DWT_CTRL |= ARM_DWT_CTRL_CYCCNTENA;
-	// start bit
-	target = cycles_per_bit;
-	noInterrupts();
-	begin_cycle = ARM_DWT_CYCCNT;
-	*txreg = 0;
-	wait_for_target(begin_cycle, target);
-	// 8 data bits
-	for (mask = 1; mask; mask <<= 1) {
-		*txreg = (b & mask) ? 1 : 0;
-		target += cycles_per_bit;
-		wait_for_target(begin_cycle, target);
-	}
-	// stop bit
-	*txreg = 1;
-	interrupts();
-	target += cycles_per_bit;
-	while (ARM_DWT_CYCCNT - begin_cycle < target) ; // wait
-	return 1;
-}
-
-void SoftwareSerial::flush()
-{
-	if (port) port->flush();
-}
-
-// TODO implement reception using pin change DMA capturing
-// ARM_DWT_CYCCNT and the bitband mapped GPIO_PDIR register
-// to a circular buffer (8 bytes per event... memory intensive)
-
-int SoftwareSerial::available()
-{
-	if (port) return port->available();
-	return 0;
-}
-
-int SoftwareSerial::peek()
-{
-	if (port) return port->peek();
-	return -1;
-}
-
-int SoftwareSerial::read()
-{
-	if (port) return port->read();
-	return -1;
-}
-
-#else
-
-//
-// Lookup table
-//
-typedef struct _DELAY_TABLE
-{
-  long baud;
-  unsigned short rx_delay_centering;
-  unsigned short rx_delay_intrabit;
-  unsigned short rx_delay_stopbit;
-  unsigned short tx_delay;
-} DELAY_TABLE;
-
-#if F_CPU == 16000000
-
-static const DELAY_TABLE PROGMEM table[] = 
-{
-  //  baud    rxcenter   rxintra    rxstop    tx
-  { 115200,   1,         17,        17,       12,    },
-  { 57600,    10,        37,        37,       33,    },
-  { 38400,    25,        57,        57,       54,    },
-  { 31250,    31,        70,        70,       68,    },
-  { 28800,    34,        77,        77,       74,    },
-  { 19200,    54,        117,       117,      114,   },
-  { 14400,    74,        156,       156,      153,   },
-  { 9600,     114,       236,       236,      233,   },
-  { 4800,     233,       474,       474,      471,   },
-  { 2400,     471,       950,       950,      947,   },
-  { 1200,     947,       1902,      1902,     1899,  },
-  { 600,      1902,      3804,      3804,     3800,  },
-  { 300,      3804,      7617,      7617,     7614,  },
-};
-
-const int XMIT_START_ADJUSTMENT = 5;
-
-#elif F_CPU == 8000000
-
-static const DELAY_TABLE table[] PROGMEM = 
-{
-  //  baud    rxcenter    rxintra    rxstop  tx
-  { 115200,   1,          5,         5,      3,      },
-  { 57600,    1,          15,        15,     13,     },
-  { 38400,    2,          25,        26,     23,     },
-  { 31250,    7,          32,        33,     29,     },
-  { 28800,    11,         35,        35,     32,     },
-  { 19200,    20,         55,        55,     52,     },
-  { 14400,    30,         75,        75,     72,     },
-  { 9600,     50,         114,       114,    112,    },
-  { 4800,     110,        233,       233,    230,    },
-  { 2400,     229,        472,       472,    469,    },
-  { 1200,     467,        948,       948,    945,    },
-  { 600,      948,        1895,      1895,   1890,   },
-  { 300,      1895,       3805,      3805,   3802,   },
-};
-
-const int XMIT_START_ADJUSTMENT = 4;
-
-#elif F_CPU == 20000000
-
-// 20MHz support courtesy of the good people at macegr.com.
-// Thanks, Garrett!
-
-static const DELAY_TABLE PROGMEM table[] =
-{
-  //  baud    rxcenter    rxintra    rxstop  tx
-  { 115200,   3,          21,        21,     18,     },
-  { 57600,    20,         43,        43,     41,     },
-  { 38400,    37,         73,        73,     70,     },
-  { 31250,    45,         89,        89,     88,     },
-  { 28800,    46,         98,        98,     95,     },
-  { 19200,    71,         148,       148,    145,    },
-  { 14400,    96,         197,       197,    194,    },
-  { 9600,     146,        297,       297,    294,    },
-  { 4800,     296,        595,       595,    592,    },
-  { 2400,     592,        1189,      1189,   1186,   },
-  { 1200,     1187,       2379,      2379,   2376,   },
-  { 600,      2379,       4759,      4759,   4755,   },
-  { 300,      4759,       9523,      9523,   9520,   },
-};
-
-const int XMIT_START_ADJUSTMENT = 6;
-
-#else
-
-#error This version of SoftwareSerial supports only 20, 16 and 8MHz processors
-
-#endif
+#include "WD_SoftwareSerial.h"
+#include <util/delay_basic.h>
 
 //
 // Statics
 //
-SoftwareSerial *SoftwareSerial::active_object = 0;
-char SoftwareSerial::_receive_buffer[_SS_MAX_RX_BUFF]; 
-volatile uint8_t SoftwareSerial::_receive_buffer_tail = 0;
-volatile uint8_t SoftwareSerial::_receive_buffer_head = 0;
+WD_SoftwareSerial *WD_SoftwareSerial::active_object = 0;
+uint8_t WD_SoftwareSerial::_receive_buffer[_SS_MAX_RX_BUFF];
+volatile uint8_t WD_SoftwareSerial::_receive_buffer_tail = 0;
+volatile uint8_t WD_SoftwareSerial::_receive_buffer_head = 0;
 
 //
 // Debugging
 //
 // This function generates a brief pulse
 // for debugging or measuring on an oscilloscope.
+#if _DEBUG
 inline void DebugPulse(uint8_t pin, uint8_t count)
 {
-#if _DEBUG
   volatile uint8_t *pport = portOutputRegister(digitalPinToPort(pin));
 
   uint8_t val = *pport;
@@ -387,49 +78,59 @@ inline void DebugPulse(uint8_t pin, uint8_t count)
     *pport = val | digitalPinToBitMask(pin);
     *pport = val;
   }
-#endif
 }
+#else
+inline void DebugPulse(uint8_t, uint8_t) {}
+#endif
 
 //
 // Private methods
 //
 
 /* static */ 
-inline void SoftwareSerial::tunedDelay(uint16_t delay) { 
-  uint8_t tmp=0;
-
-  asm volatile("sbiw    %0, 0x01 \n\t"
-    "ldi %1, 0xFF \n\t"
-    "cpi %A0, 0xFF \n\t"
-    "cpc %B0, %1 \n\t"
-    "brne .-10 \n\t"
-    : "+r" (delay), "+a" (tmp)
-    : "0" (delay)
-    );
+inline void WD_SoftwareSerial::tunedDelay(uint16_t delay) {
+  _delay_loop_2(delay);
 }
 
 // This function sets the current object as the "listening"
 // one and returns true if it replaces another 
-bool SoftwareSerial::listen()
+bool WD_SoftwareSerial::listen()
 {
+  if (!_rx_delay_stopbit)
+    return false;
+
   if (active_object != this)
   {
+    if (active_object)
+      active_object->stopListening();
+
     _buffer_overflow = false;
-    uint8_t oldSREG = SREG;
-    cli();
     _receive_buffer_head = _receive_buffer_tail = 0;
     active_object = this;
-    SREG = oldSREG;
+
+    setRxIntMsk(true);
     return true;
   }
 
   return false;
 }
 
+// Stop listening. Returns true if we were actually listening.
+bool WD_SoftwareSerial::stopListening()
+{
+  if (active_object == this)
+  {
+    setRxIntMsk(false);
+    active_object = NULL;
+    return true;
+  }
+  return false;
+}
+
 //
 // The receive routine called by the interrupt handler
 //
-void SoftwareSerial::recv()
+void WD_SoftwareSerial::recv()
 {
 
 #if GCC_VERSION < 40302
@@ -454,43 +155,49 @@ void SoftwareSerial::recv()
   // so interrupt is probably not for us
   if (_inverse_logic ? rx_pin_read() : !rx_pin_read())
   {
+    // Disable further interrupts during reception, this prevents
+    // triggering another interrupt directly after we return, which can
+    // cause problems at higher baudrates.
+    setRxIntMsk(false);
+
     // Wait approximately 1/2 of a bit width to "center" the sample
     tunedDelay(_rx_delay_centering);
     DebugPulse(_DEBUG_PIN2, 1);
 
     // Read each of the 8 bits
-    for (uint8_t i=0x1; i; i <<= 1)
+    for (uint8_t i=8; i > 0; --i)
     {
       tunedDelay(_rx_delay_intrabit);
+      d >>= 1;
       DebugPulse(_DEBUG_PIN2, 1);
-      uint8_t noti = ~i;
       if (rx_pin_read())
-        d |= i;
-      else // else clause added to ensure function timing is ~balanced
-        d &= noti;
+        d |= 0x80;
     }
-
-    // skip the stop bit
-    tunedDelay(_rx_delay_stopbit);
-    DebugPulse(_DEBUG_PIN2, 1);
 
     if (_inverse_logic)
       d = ~d;
 
     // if buffer full, set the overflow flag and return
-    if ((_receive_buffer_tail + 1) % _SS_MAX_RX_BUFF != _receive_buffer_head) 
+    uint8_t next = (_receive_buffer_tail + 1) % _SS_MAX_RX_BUFF;
+    if (next != _receive_buffer_head)
     {
       // save new data in buffer: tail points to where byte goes
       _receive_buffer[_receive_buffer_tail] = d; // save new byte
-      _receive_buffer_tail = (_receive_buffer_tail + 1) % _SS_MAX_RX_BUFF;
+      _receive_buffer_tail = next;
     } 
     else 
     {
-#if _DEBUG // for scope: pulse pin as overflow indictator
       DebugPulse(_DEBUG_PIN1, 1);
-#endif
       _buffer_overflow = true;
     }
+
+    // skip the stop bit
+    tunedDelay(_rx_delay_stopbit);
+    DebugPulse(_DEBUG_PIN1, 1);
+
+    // Re-enable interrupts when we're sure to be inside the stop bit
+    setRxIntMsk(true);
+
   }
 
 #if GCC_VERSION < 40302
@@ -509,15 +216,7 @@ void SoftwareSerial::recv()
 #endif
 }
 
-void SoftwareSerial::tx_pin_write(uint8_t pin_state)
-{
-  if (pin_state == LOW)
-    *_transmitPortRegister &= ~_transmitBitMask;
-  else
-    *_transmitPortRegister |= _transmitBitMask;
-}
-
-uint8_t SoftwareSerial::rx_pin_read()
+uint8_t WD_SoftwareSerial::rx_pin_read()
 {
   return *_receivePortRegister & _receiveBitMask;
 }
@@ -526,8 +225,16 @@ uint8_t SoftwareSerial::rx_pin_read()
 // Interrupt handling
 //
 
+// Gets called from attachInterrupt
+#if defined(INT_ONLY) || defined(INT_AND_PCINT)
+static void isr()
+{
+  WD_SoftwareSerial::handle_interrupt();
+}
+#endif
+
 /* static */
-inline void SoftwareSerial::handle_interrupt()
+void WD_SoftwareSerial::handle_interrupt()
 {
   if (active_object)
   {
@@ -535,38 +242,30 @@ inline void SoftwareSerial::handle_interrupt()
   }
 }
 
-#if defined(PCINT0_vect)
-ISR(PCINT0_vect)
-{
-  SoftwareSerial::handle_interrupt();
-}
-#endif
-
-#if defined(PCINT1_vect)
-ISR(PCINT1_vect)
-{
-  SoftwareSerial::handle_interrupt();
-}
-#endif
-
-#if defined(PCINT2_vect)
-ISR(PCINT2_vect)
-{
-  SoftwareSerial::handle_interrupt();
-}
-#endif
-
-#if defined(PCINT3_vect)
-ISR(PCINT3_vect)
-{
-  SoftwareSerial::handle_interrupt();
-}
-#endif
+//FH
+//#if defined(PCINT0_vect)
+//ISR(PCINT0_vect)
+//{
+//  SoftwareSerial::handle_interrupt();
+//}
+//#endif
+//
+//#if defined(PCINT1_vect)
+//ISR(PCINT1_vect, ISR_ALIASOF(PCINT0_vect));
+//#endif
+//
+//#if defined(PCINT2_vect)
+//ISR(PCINT2_vect, ISR_ALIASOF(PCINT0_vect));
+//#endif
+//
+//#if defined(PCINT3_vect)
+//ISR(PCINT3_vect, ISR_ALIASOF(PCINT0_vect));
+//#endif
 
 //
 // Constructor
 //
-SoftwareSerial::SoftwareSerial(uint8_t receivePin, uint8_t transmitPin, bool inverse_logic /* = false */) : 
+WD_SoftwareSerial::WD_SoftwareSerial(int8_t receivePin, int8_t transmitPin, bool inverse_logic /* = false */) :
   _rx_delay_centering(0),
   _rx_delay_intrabit(0),
   _rx_delay_stopbit(0),
@@ -581,21 +280,25 @@ SoftwareSerial::SoftwareSerial(uint8_t receivePin, uint8_t transmitPin, bool inv
 //
 // Destructor
 //
-SoftwareSerial::~SoftwareSerial()
+WD_SoftwareSerial::~WD_SoftwareSerial()
 {
   end();
 }
 
-void SoftwareSerial::setTX(uint8_t tx)
+void WD_SoftwareSerial::setTX(int8_t tx)
 {
+  // First write, then set output. If we do this the other way around,
+  // the pin would be output low for a short while before switching to
+  // output high. Now, it is input with pullup for a short while, which
+  // is fine. With inverse logic, either order is fine.
+  digitalWrite(tx, _inverse_logic ? LOW : HIGH);
   pinMode(tx, OUTPUT);
-  digitalWrite(tx, HIGH);
   _transmitBitMask = digitalPinToBitMask(tx);
   uint8_t port = digitalPinToPort(tx);
   _transmitPortRegister = portOutputRegister(port);
 }
 
-void SoftwareSerial::setRX(uint8_t rx)
+void WD_SoftwareSerial::setRX(int8_t rx)
 {
   pinMode(rx, INPUT);
   if (!_inverse_logic)
@@ -606,37 +309,131 @@ void SoftwareSerial::setRX(uint8_t rx)
   _receivePortRegister = portInputRegister(port);
 }
 
+uint16_t WD_SoftwareSerial::subtract_cap(uint16_t num, uint16_t sub) {
+  if (num > sub)
+    return num - sub;
+  else
+    return 1;
+}
+
 //
 // Public methods
 //
 
-void SoftwareSerial::begin(long speed)
-{
+void WD_SoftwareSerial::begin(long speed)
+{ 
   _rx_delay_centering = _rx_delay_intrabit = _rx_delay_stopbit = _tx_delay = 0;
 
-  for (unsigned i=0; i<sizeof(table)/sizeof(table[0]); ++i)
-  {
-    long baud = pgm_read_dword(&table[i].baud);
-    if (baud == speed)
-    {
-      _rx_delay_centering = pgm_read_word(&table[i].rx_delay_centering);
-      _rx_delay_intrabit = pgm_read_word(&table[i].rx_delay_intrabit);
-      _rx_delay_stopbit = pgm_read_word(&table[i].rx_delay_stopbit);
-      _tx_delay = pgm_read_word(&table[i].tx_delay);
-      break;
-    }
-  }
+  // Precalculate the various delays, in number of 4-cycle delays
+  uint16_t bit_delay = (F_CPU / speed) / 4;
 
-  // Set up RX interrupts, but only if we have a valid RX baud rate
-  if (_rx_delay_stopbit)
-  {
-    if (digitalPinToPCICR(_receivePin))
-    {
-      *digitalPinToPCICR(_receivePin) |= _BV(digitalPinToPCICRbit(_receivePin));
-      *digitalPinToPCMSK(_receivePin) |= _BV(digitalPinToPCMSKbit(_receivePin));
-    }
+  // 12 (gcc 4.8.2) or 13 (gcc 4.3.2) cycles from start bit to first bit,
+  // 15 (gcc 4.8.2) or 16 (gcc 4.3.2) cycles between bits,
+  // 12 (gcc 4.8.2) or 14 (gcc 4.3.2) cycles from last bit to stop bit
+  // These are all close enough to just use 15 cycles, since the inter-bit
+  // timings are the most critical (deviations stack 8 times)
+  _tx_delay = subtract_cap(bit_delay, 15 / 4);
+
+#if defined(PCINT_ONLY) || defined(INT_AND_PCINT)
+  // Only setup rx when we have a valid PCINT for this pin
+  if (digitalPinToPCICR(_receivePin)) {
+    #if GCC_VERSION > 40800
+    // Timings counted from gcc 4.8.2 output. This works up to 115200 on
+    // 16Mhz and 57600 on 8Mhz.
+    //
+    // When the start bit occurs, there are 3 or 4 cycles before the
+    // interrupt flag is set, 4 cycles before the PC is set to the right
+    // interrupt vector address and the old PC is pushed on the stack,
+    // and then 75 cycles of instructions (including the RJMP in the
+    // ISR vector table) until the first delay. After the delay, there
+    // are 17 more cycles until the pin value is read (excluding the
+    // delay in the loop).
+    // We want to have a total delay of 1.5 bit time. Inside the loop,
+    // we already wait for 1 bit time - 23 cycles, so here we wait for
+    // 0.5 bit time - (71 + 18 - 22) cycles.
+    _rx_delay_centering = subtract_cap(bit_delay / 2, (4 + 4 + 75 + 17 - 23) / 4);
+
+    // There are 23 cycles in each loop iteration (excluding the delay)
+    _rx_delay_intrabit = subtract_cap(bit_delay, 23 / 4);
+
+    // There are 37 cycles from the last bit read to the start of
+    // stopbit delay and 11 cycles from the delay until the interrupt
+    // mask is enabled again (which _must_ happen during the stopbit).
+    // This delay aims at 3/4 of a bit time, meaning the end of the
+    // delay will be at 1/4th of the stopbit. This allows some extra
+    // time for ISR cleanup, which makes 115200 baud at 16Mhz work more
+    // reliably
+    _rx_delay_stopbit = subtract_cap(bit_delay * 3 / 4, (37 + 11) / 4);
+    #else // Timings counted from gcc 4.3.2 output
+    // Note that this code is a _lot_ slower, mostly due to bad register
+    // allocation choices of gcc. This works up to 57600 on 16Mhz and
+    // 38400 on 8Mhz.
+    _rx_delay_centering = subtract_cap(bit_delay / 2, (4 + 4 + 97 + 29 - 11) / 4);
+    _rx_delay_intrabit = subtract_cap(bit_delay, 11 / 4);
+    _rx_delay_stopbit = subtract_cap(bit_delay * 3 / 4, (44 + 17) / 4);
+    #endif
+
+
+    // Enable the PCINT for the entire port here, but never disable it
+    // (others might also need it, so we disable the interrupt by using
+    // the per-pin PCMSK register).
+    *digitalPinToPCICR(_receivePin) |= _BV(digitalPinToPCICRbit(_receivePin));
+    // Precalculate the pcint mask register and value, so setRxIntMask
+    // can be used inside the ISR without costing too much time.
+    _pcint_maskreg = digitalPinToPCMSK(_receivePin);
+    _pcint_maskvalue = _BV(digitalPinToPCMSKbit(_receivePin));
+
     tunedDelay(_tx_delay); // if we were low this establishes the end
   }
+#endif //end PCINT_ONLY || INT_AND_PCINT
+
+#if defined(INT_AND_PCINT)
+  else
+#endif  
+#if defined(INT_ONLY) || defined(INT_AND_PCINT)
+  {
+     // Direct interrupts
+     attachInterrupt(digitalPinToInterrupt(_receivePin), isr, CHANGE);
+     
+    #if GCC_VERSION > 40800
+    // Timings counted from gcc 4.8.2 output. This works up to 115200 on
+    // 16Mhz and 57600 on 8Mhz.
+    //
+    // When the start bit occurs, there are 3 or 4 cycles before the
+    // interrupt flag is set, 4 cycles before the PC is set to the right
+    // interrupt vector address and the old PC is pushed on the stack,
+    // and then 75 cycles of instructions (including the RJMP in the
+    // ISR vector table) until the first delay. After the delay, there
+    // are 17 more cycles until the pin value is read (excluding the
+    // delay in the loop).
+    // We want to have a total delay of 1.5 bit time. Inside the loop,
+    // we already wait for 1 bit time - 23 cycles, so here we wait for
+    // 0.5 bit time - (71 + 18 - 22) cycles.
+    _rx_delay_centering = subtract_cap(bit_delay / 2, (4 + 4 + 75 + 17 - 23) / 4);
+
+    // There are 23 cycles in each loop iteration (excluding the delay)
+    _rx_delay_intrabit = subtract_cap(bit_delay, 23 / 4);
+
+    // There are 37 cycles from the last bit read to the start of
+    // stopbit delay and 11 cycles from the delay until the interrupt
+    // mask is enabled again (which _must_ happen during the stopbit).
+    // This delay aims at 3/4 of a bit time, meaning the end of the
+    // delay will be at 1/4th of the stopbit. This allows some extra
+    // time for ISR cleanup, which makes 115200 baud at 16Mhz work more
+    // reliably
+    _rx_delay_stopbit = subtract_cap(bit_delay * 3 / 4, (37 + 11) / 4);
+    #else // Timings counted from gcc 4.3.2 output
+    // Note that this code is a _lot_ slower, mostly due to bad register
+    // allocation choices of gcc. This works up to 57600 on 16Mhz and
+    // 38400 on 8Mhz.
+    _rx_delay_centering = subtract_cap(bit_delay / 2, (4 + 4 + 97 + 29 - 11) / 4);
+    _rx_delay_intrabit = subtract_cap(bit_delay, 11 / 4);
+    _rx_delay_stopbit = subtract_cap(bit_delay * 3 / 4, (44 + 17) / 4);
+    #endif
+
+    tunedDelay(_tx_delay); // if we were low this establishes the end
+  }
+#endif // INT_ONLY || INT_AND_PCINT
 
 #if _DEBUG
   pinMode(_DEBUG_PIN1, OUTPUT);
@@ -646,15 +443,22 @@ void SoftwareSerial::begin(long speed)
   listen();
 }
 
-void SoftwareSerial::end()
+void WD_SoftwareSerial::setRxIntMsk(bool enable)
 {
-  if (digitalPinToPCMSK(_receivePin))
-    *digitalPinToPCMSK(_receivePin) &= ~_BV(digitalPinToPCMSKbit(_receivePin));
+    if (enable)
+      *_pcint_maskreg |= _pcint_maskvalue;
+    else
+      *_pcint_maskreg &= ~_pcint_maskvalue;
+}
+
+void WD_SoftwareSerial::end()
+{
+  stopListening();
 }
 
 
 // Read data from buffer
-int SoftwareSerial::read()
+int WD_SoftwareSerial::read()
 {
   if (!isListening())
     return -1;
@@ -669,7 +473,7 @@ int SoftwareSerial::read()
   return d;
 }
 
-int SoftwareSerial::available()
+int WD_SoftwareSerial::available()
 {
   if (!isListening())
     return 0;
@@ -677,49 +481,54 @@ int SoftwareSerial::available()
   return (_receive_buffer_tail + _SS_MAX_RX_BUFF - _receive_buffer_head) % _SS_MAX_RX_BUFF;
 }
 
-size_t SoftwareSerial::write(uint8_t b)
+size_t WD_SoftwareSerial::write(uint8_t b)
 {
   if (_tx_delay == 0) {
     setWriteError();
     return 0;
   }
 
+  // By declaring these as local variables, the compiler will put them
+  // in registers _before_ disabling interrupts and entering the
+  // critical timing sections below, which makes it a lot easier to
+  // verify the cycle timings
+  volatile uint8_t *reg = _transmitPortRegister;
+  uint8_t reg_mask = _transmitBitMask;
+  uint8_t inv_mask = ~_transmitBitMask;
   uint8_t oldSREG = SREG;
+  bool inv = _inverse_logic;
+  uint16_t delay = _tx_delay;
+
+  if (inv)
+    b = ~b;
+
   cli();  // turn off interrupts for a clean txmit
 
   // Write the start bit
-  tx_pin_write(_inverse_logic ? HIGH : LOW);
-  tunedDelay(_tx_delay + XMIT_START_ADJUSTMENT);
+  if (inv)
+    *reg |= reg_mask;
+  else
+    *reg &= inv_mask;
+
+  tunedDelay(delay);
 
   // Write each of the 8 bits
-  if (_inverse_logic)
+  for (uint8_t i = 8; i > 0; --i)
   {
-    for (byte mask = 0x01; mask; mask <<= 1)
-    {
-      if (b & mask) // choose bit
-        tx_pin_write(LOW); // send 1
-      else
-        tx_pin_write(HIGH); // send 0
-    
-      tunedDelay(_tx_delay);
-    }
+    if (b & 1) // choose bit
+      *reg |= reg_mask; // send 1
+    else
+      *reg &= inv_mask; // send 0
 
-    tx_pin_write(LOW); // restore pin to natural state
+    tunedDelay(delay);
+    b >>= 1;
   }
+
+  // restore pin to natural state
+  if (inv)
+    *reg &= inv_mask;
   else
-  {
-    for (byte mask = 0x01; mask; mask <<= 1)
-    {
-      if (b & mask) // choose bit
-        tx_pin_write(HIGH); // send 1
-      else
-        tx_pin_write(LOW); // send 0
-    
-      tunedDelay(_tx_delay);
-    }
-
-    tx_pin_write(HIGH); // restore pin to natural state
-  }
+    *reg |= reg_mask;
 
   SREG = oldSREG; // turn interrupts back on
   tunedDelay(_tx_delay);
@@ -727,18 +536,12 @@ size_t SoftwareSerial::write(uint8_t b)
   return 1;
 }
 
-void SoftwareSerial::flush()
+void WD_SoftwareSerial::flush()
 {
-  if (!isListening())
-    return;
-
-  uint8_t oldSREG = SREG;
-  cli();
-  _receive_buffer_head = _receive_buffer_tail = 0;
-  SREG = oldSREG;
+  // There is no tx buffering, simply return
 }
 
-int SoftwareSerial::peek()
+int WD_SoftwareSerial::peek()
 {
   if (!isListening())
     return -1;
@@ -750,5 +553,3 @@ int SoftwareSerial::peek()
   // Read from "head"
   return _receive_buffer[_receive_buffer_head];
 }
-
-#endif
